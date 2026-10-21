@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 ROOT = Path.cwd()
 EXCEL_FILE = ROOT / "local.xlsx"
 OUTPUT_FILE = ROOT / "argentina.json"
-SHEET_NAME = "local"
+SHEET_NAME = "Etiquetas_localidades"
 
 COLUMN_MAP = {
     "código de jurisdicción": "jurisdiction_code",
