@@ -3,17 +3,17 @@ import json
 import math
 import re
 import sys
-import unicodedata
 from pathlib import Path
 
 from openpyxl import load_workbook
 
 
 ROOT = Path.cwd()
-SHEET_NAME = "local"
+EXCEL_FILE = ROOT / "local.xlsx"
 OUTPUT_FILE = ROOT / "argentina.json"
+SHEET_NAME = "local"
 
-REQUIRED_COLUMNS = {
+COLUMN_MAP = {
     "código de jurisdicción": "jurisdiction_code",
     "jurisdicción": "jurisdiction",
     "código de departamento": "department_code",
@@ -32,12 +32,10 @@ REQUIRED_COLUMNS = {
 def normalize_header(value):
     if value is None:
         return ""
-    value = str(value).strip().lower()
-    value = re.sub(r"\s+", " ", value)
-    return value
+    return re.sub(r"\s+", " ", str(value).strip().lower())
 
 
-def cell_value(cell, preserve_code=False):
+def get_value(cell, is_code=False):
     value = cell.value
 
     if value is None:
@@ -45,150 +43,114 @@ def cell_value(cell, preserve_code=False):
 
     if isinstance(value, str):
         value = value.strip()
-        return value if value else None
+        return value or None
 
     if isinstance(value, bool):
         return str(value)
 
     if isinstance(value, (int, float)):
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+            if value.is_integer():
+                value = int(value)
 
-        if isinstance(value, float) and value.is_integer():
-            value = int(value)
-
-        if preserve_code and isinstance(value, int):
-            number_format = cell.number_format or ""
-
-            # Preserve leading zeros when the Excel cell uses a zero mask.
-            if re.fullmatch(r"0+", number_format):
-                return str(value).zfill(len(number_format))
+        if is_code and isinstance(value, int):
+            fmt = cell.number_format or ""
+            if re.fullmatch(r"0+", fmt):
+                return str(value).zfill(len(fmt))
 
         return str(value)
 
-    return str(value).strip()
-
-
-def find_workbook():
-    candidates = []
-
-    for path in ROOT.rglob("*.xlsx"):
-        if any(part.startswith(".") for part in path.relative_to(ROOT).parts):
-            continue
-        if path.name.startswith("~$"):
-            continue
-
-        try:
-            workbook = load_workbook(
-                path,
-                read_only=True,
-                data_only=True,
-            )
-            has_sheet = SHEET_NAME in workbook.sheetnames
-            workbook.close()
-
-            if has_sheet:
-                candidates.append(path)
-        except Exception as exc:
-            print(f"Skipping unreadable workbook {path}: {exc}")
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"No Excel workbook containing worksheet '{SHEET_NAME}' was found."
-        )
-
-    if len(candidates) > 1:
-        names = "\n".join(str(path) for path in candidates)
-        raise RuntimeError(
-            "Multiple workbooks contain the worksheet 'local'. "
-            "Keep only the intended workbook or configure its path:\n" + names
-        )
-
-    return candidates[0]
+    return str(value).strip() or None
 
 
 def main():
-    workbook_path = find_workbook()
-    print(f"Source workbook: {workbook_path}")
+    if not EXCEL_FILE.is_file():
+        raise FileNotFoundError(
+            f"Excel file not found: {EXCEL_FILE}\n"
+            "Ensure local.xlsx is in the repository root."
+        )
+
+    print(f"Reading workbook: {EXCEL_FILE}")
 
     workbook = load_workbook(
-        workbook_path,
+        EXCEL_FILE,
         read_only=True,
         data_only=True,
     )
 
     try:
-        worksheet = workbook[SHEET_NAME]
-        rows = worksheet.iter_rows()
-        header_cells = next(rows, None)
+        print(f"Available worksheets: {workbook.sheetnames}")
 
-        if not header_cells:
+        if SHEET_NAME not in workbook.sheetnames:
+            raise ValueError(
+                f"Worksheet '{SHEET_NAME}' not found. "
+                f"Available worksheets: {workbook.sheetnames}"
+            )
+
+        sheet = workbook[SHEET_NAME]
+        iterator = sheet.iter_rows()
+        header_row = next(iterator, None)
+
+        if not header_row:
             raise ValueError("The worksheet is empty.")
 
-        headers = {}
-        for index, cell in enumerate(header_cells):
-            normalized = normalize_header(cell.value)
-            if normalized:
-                headers[normalized] = index
+        header_indexes = {}
+
+        for index, cell in enumerate(header_row):
+            header = normalize_header(cell.value)
+            if header:
+                header_indexes[header] = index
 
         missing = [
-            name for name in REQUIRED_COLUMNS
-            if name not in headers
+            column for column in COLUMN_MAP
+            if column not in header_indexes
         ]
 
         if missing:
             raise ValueError(
-                "Missing required Excel columns:\n- "
-                + "\n- ".join(missing)
+                "Missing required columns: "
+                + ", ".join(missing)
                 + "\nFound columns: "
-                + ", ".join(headers.keys())
+                + ", ".join(header_indexes)
             )
 
         records = []
         seen_ids = set()
         skipped_rows = 0
 
-        for row_number, cells in enumerate(rows, start=2):
-            def get_value(source_header):
-                index = headers[source_header]
-                if index >= len(cells):
-                    return None
+        for row_number, row in enumerate(iterator, start=2):
+            record = {}
 
-                return cell_value(
-                    cells[index],
-                    preserve_code=(
-                        "código" in source_header
-                    ),
+            for source_column, output_column in COLUMN_MAP.items():
+                index = header_indexes[source_column]
+                cell = row[index] if index < len(row) else None
+
+                record[output_column] = (
+                    get_value(
+                        cell,
+                        is_code=("código" in source_column),
+                    )
+                    if cell is not None
+                    else None
                 )
 
-            locality_id = get_value("código de localidad")
-            locality_name = get_value("localidad")
+            locality_id = record["locality_id"]
+            locality_name = record["locality"]
 
-            # Ignore blank rows and source/update-note footer rows.
+            # Skip blank rows and non-data footer rows.
             if not locality_id or not locality_name:
                 skipped_rows += 1
                 continue
 
-            record = {}
-
-            for source_header, output_key in REQUIRED_COLUMNS.items():
-                value = get_value(source_header)
-
-                if output_key == "locality_id":
-                    value = locality_id
-                elif output_key == "locality":
-                    value = locality_name
-
-                record[output_key] = value
-
-            # Preserve the locality ID as a string.
+            # Store identifiers as strings.
             record["locality_id"] = str(locality_id)
 
             if record["locality_id"] in seen_ids:
                 raise ValueError(
                     f"Duplicate locality ID '{record['locality_id']}' "
-                    f"found at Excel row {row_number}. "
-                    "Resolve duplicate IDs before generating the JSON."
+                    f"at Excel row {row_number}."
                 )
 
             seen_ids.add(record["locality_id"])
@@ -200,7 +162,6 @@ def main():
     if not records:
         raise ValueError("No valid locality records were found.")
 
-    # Stable ordering for reproducible builds.
     records.sort(
         key=lambda item: (
             item["jurisdiction_code"] or "",
@@ -209,9 +170,9 @@ def main():
         )
     )
 
-    temporary_file = OUTPUT_FILE.with_suffix(".json.tmp")
+    temp_file = OUTPUT_FILE.with_suffix(".json.tmp")
 
-    with temporary_file.open("w", encoding="utf-8", newline="\n") as file:
+    with temp_file.open("w", encoding="utf-8", newline="\n") as file:
         json.dump(
             records,
             file,
@@ -220,12 +181,12 @@ def main():
         )
         file.write("\n")
 
-    temporary_file.replace(OUTPUT_FILE)
+    temp_file.replace(OUTPUT_FILE)
 
+    print(f"SUCCESS: Generated {OUTPUT_FILE}")
     print(f"Valid localities: {len(records)}")
-    print(f"Skipped blank/footer rows: {skipped_rows}")
     print(f"Unique locality IDs: {len(seen_ids)}")
-    print(f"Output: {OUTPUT_FILE}")
+    print(f"Skipped blank/footer rows: {skipped_rows}")
 
 
 if __name__ == "__main__":
