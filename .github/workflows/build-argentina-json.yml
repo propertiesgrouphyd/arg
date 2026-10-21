@@ -1,0 +1,48 @@
+
+name: Build Argentina Localities JSON
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**/*.xlsx'
+      - '.github/workflows/build-argentina-json.yml'
+      - 'scripts/build-argentina-json.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-argentina-json
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install openpyxl
+
+      - name: Generate Argentina JSON
+        run: python scripts/build-argentina-json.py
+
+      - name: Commit updated JSON
+        run: |
+          git add argentina.json
+          if git diff --cached --quiet; then
+            echo "argentina.json is already up to date."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Build Argentina localities JSON"
+            git push
+          fi
